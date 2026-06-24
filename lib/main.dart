@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:nfc_manager/nfc_manager.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const MyApp());
@@ -64,62 +65,109 @@ class _HomePageState extends State<HomePage> {
   int _selectedIndex = 0;
   bool _isScanning = false;
 
-  // دالة تشغيل الـ NFC القياسية والمستقرة للتحديث الجديد
-  Future<void> _startNFC() async {
-    try {
-      bool available = await NfcManager.instance.isAvailable();
+ 
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedData(); // استدعاء البيانات تلقائياً عند فتح التطبيق
+  }
 
-      if (!available) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("⚠️ ميزة NFC غير مفعلة أو غير مدعومة على هذا الجهاز")),
-        );
-        return;
+  // تحميل البيانات والارتباطات والكميات المحفوظة في ذاكرة الجوال
+  Future<void> _loadSavedData() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      for (var chemical in _chemicals) {
+        chemical.tagId = prefs.getString('${chemical.name}_tag');
+        chemical.quantity = prefs.getInt('${chemical.name}_qty') ?? 0;
       }
+    });
+  }
 
-      setState(() {
-        _isScanning = true;
-      });
+  // حفظ بيانات مادة معينة فور تعديلها
+  Future<void> _saveChemicalData(Chemical chemical) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (chemical.tagId != null) {
+      await prefs.setString('${chemical.name}_tag', chemical.tagId!);
+    }
+    await prefs.setInt('${chemical.name}_qty', chemical.quantity);
+  }
 
-      // تشغيل الجلسة بدون معاملات إضافية تسبب تعارضاً مع التحديث
-NfcManager.instance.startSession(
-  pollingOptions: {
-    NfcPollingOption.iso14443,
-    NfcPollingOption.iso18092,
-    NfcPollingOption.iso15693,
-  },        onDiscovered: (NfcTag tag) async {
-          // جلب معرف البطاقة بشكل آمن
-final String tagId = tag.toString();
+  // دالة تشغيل الـ NFC القياسية والمستقرة والمحمية من الـ Crash
+Future<void> _startNFC() async {
+  try {
+final availability =
+    await NfcManager.instance.checkAvailability();
+
+if (availability != NfcAvailability.enabled) {
+  if (!mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    const SnackBar(content: Text("⚠️ ميزة NFC غير مفعلة أو غير مدعومة")),
+  );
+  return;
+}
+
+    setState(() {
+      _isScanning = true;
+    });
+
+    await NfcManager.instance.stopSession().catchError((_) {});
+
+    NfcManager.instance.startSession(
+      pollingOptions: {
+        NfcPollingOption.iso14443,
+        NfcPollingOption.iso15693,
+        NfcPollingOption.iso18092,
+      },
+      onDiscovered: (NfcTag tag) async {
+        try {
+          String scannedPayload = tag.toString();
+
           setState(() {
-            _chemicals[_selectedIndex].tagId = tagId;
             _isScanning = false;
-          });
 
-          await NfcManager.instance.stopSession();
+            if (scannedPayload.contains("TYJ10") || scannedPayload == "TYJ10") {
+              _chemicals[0].tagId = "TYJ10";
+              _chemicals[1].tagId = "TYJ10";
+              _saveChemicalData(_chemicals[0]);
+              _saveChemicalData(_chemicals[1]);
+            } else {
+              _chemicals[_selectedIndex].tagId = scannedPayload;
+              _saveChemicalData(_chemicals[_selectedIndex]);
+            }
+          });
 
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("✅ تم ربط البطاقة بنجاح بمادة: ${_chemicals[_selectedIndex].name}"),
+            const SnackBar(
+              content: Text("✅ تم معالجة بطاقة NFC بنجاح!"),
               backgroundColor: Colors.green,
             ),
           );
-        },
-      );
-    } catch (e) {
-      setState(() {
-        _isScanning = false;
-      });
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("حساس الـ NFC غير مستعد حالياً")),
-      );
-    }
+        } catch (e) {
+          print("خطأ داخلي أثناء المعالجة: $e");
+        } finally {
+          await NfcManager.instance.stopSession().catchError((_) {});
+          setState(() {
+            _isScanning = false;
+          });
+        }
+      },
+    );
+  } catch (e) {
+    setState(() {
+      _isScanning = false;
+    });
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("حساس الـ NFC غير مستعد حالياً")),
+    );
   }
+}
 
   void _increaseQty(int index) {
     setState(() {
       _chemicals[index].quantity++;
+      _saveChemicalData(_chemicals[index]); // حفظ الكمية الجديدة
     });
   }
 
@@ -127,8 +175,62 @@ final String tagId = tag.toString();
     setState(() {
       if (_chemicals[index].quantity > 0) {
         _chemicals[index].quantity--;
+        _saveChemicalData(_chemicals[index]); // حفظ الكمية الجديدة
       }
     });
+  }
+
+  // ميزة إضافة مواد جديدة ديناميكياً عبر نافذة منبثقة واحترافية
+  void _addNewChemicalDialog() {
+    TextEditingController nameController = TextEditingController();
+    TextEditingController formulaController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return Directionality(
+          textDirection: TextDirection.rtl,
+          child: AlertDialog(
+            title: const Text("إضافة مادة جديدة للمختبر"),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(labelText: "اسم المادة الكيميائية"),
+                ),
+                TextField(
+                  controller: formulaController,
+                  decoration: const InputDecoration(labelText: "الصيغة البرمجية أو الكيميائية (مثال: H₂O)"),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text("إلغاء"),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  if (nameController.text.isNotEmpty && formulaController.text.isNotEmpty) {
+                    setState(() {
+                      var newChem = Chemical(
+                        name: nameController.text,
+                        formula: formulaController.text,
+                      );
+                      _chemicals.add(newChem);
+                      _saveChemicalData(newChem);
+                    });
+                    Navigator.pop(context);
+                  }
+                },
+                child: const Text("إضافة المادة"),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -140,17 +242,32 @@ final String tagId = tag.toString();
         backgroundColor: Colors.teal,
         foregroundColor: Colors.white,
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _startNFC,
-        backgroundColor: _isScanning ? Colors.orange : Colors.teal,
-        icon: Icon(_isScanning ? Icons.sensors : Icons.nfc, color: Colors.white),
-        label: Text(
-          _isScanning ? "جاري القراءة..." : "ربط بطاقة NFC",
-          style: const TextStyle(color: Colors.white),
-        ),
+      // إضافة أزرار مدمجة للـ NFC ولإضافة المواد معاً بشكل منسق
+      floatingActionButton: Column(
+        mainAxisAlignment: MainAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          FloatingActionButton(
+            heroTag: "addBtn",
+            onPressed: _addNewChemicalDialog,
+            backgroundColor: Colors.teal.shade700,
+            child: const Icon(Icons.add, color: Colors.white),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton.extended(
+            heroTag: "nfcBtn",
+            onPressed: _startNFC,
+            backgroundColor: _isScanning ? Colors.orange : Colors.teal,
+            icon: Icon(_isScanning ? Icons.sensors : Icons.nfc, color: Colors.white),
+            label: Text(
+              _isScanning ? "جاري القراءة..." : "ربط بطاقة NFC",
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
       ),
       body: Directionality(
-        textDirection: TextDirection.rtl, // توجيه الواجهة بالكامل للغة العربية
+        textDirection: TextDirection.rtl,
         child: Padding(
           padding: const EdgeInsets.all(10.0),
           child: Column(
@@ -166,7 +283,7 @@ final String tagId = tag.toString();
                       Expanded(
                         child: Text(
                           "المادة المحددة للربط حالياً: ${_chemicals[_selectedIndex].name}. اضغطي على زر NFC ثم مرري البطاقة.",
-                          style: TextStyle(fontWeight: FontWeight.w500, color: Colors.teal.shade900),
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
                         ),
                       ),
                     ],
@@ -177,58 +294,82 @@ final String tagId = tag.toString();
               Expanded(
                 child: ListView.builder(
                   itemCount: _chemicals.length,
-                  itemBuilder: (context, i) {
-                    final c = _chemicals[i];
-                    final isSelected = _selectedIndex == i;
+                  itemBuilder: (context, index) {
+                    final item = _chemicals[index];
+                    bool isSelected = _selectedIndex == index;
 
-                    return Card(
-                      elevation: isSelected ? 4 : 1,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        side: BorderSide(
-                          color: isSelected ? Colors.teal : Colors.transparent,
-                          width: 2,
+                    return GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          _selectedIndex = index;
+                        });
+                      },
+                      child: Card(
+                        margin: const EdgeInsets.symmetric(vertical: 6),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(
+                            color: isSelected ? Colors.teal : Colors.transparent,
+                            width: 2,
+                          ),
                         ),
-                      ),
-                      child: ListTile(
-                        onTap: () {
-                          setState(() {
-                            _selectedIndex = i;
-                          });
-                        },
-                        title: Text(
-                          "${c.name} (${c.formula})",
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
-                        subtitle: Padding(
-                          padding: const EdgeInsets.only(top: 6.0),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                        child: Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Row(
                             children: [
-                              Text("الكمية المتوفرة: ${c.quantity}", style: const TextStyle(color: Colors.blueGrey)),
-                              const SizedBox(height: 2),
-                              Text(
-                                "المعرّف (Tag): ${c.tagId != null ? 'مرتبط بقيمة ذكية' : 'غير مرتبط ❌'}",
-                                style: TextStyle(
-                                  color: c.tagId != null ? Colors.green : Colors.red,
-                                  fontWeight: FontWeight.w500,
+                              // أزرار التحكم بالكمية
+                              Column(
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.add_circle, color: Colors.green),
+                                    onPressed: () => _increaseQty(index),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.remove_circle, color: Colors.red),
+                                    onPressed: () => _decreaseQty(index),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(width: 10),
+                              // تفاصيل المادة
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      item.name,
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                                    ),
+                                    Text(
+                                      item.formula,
+                                      style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text("الكمية المتوفرة: ${item.quantity}", style: const TextStyle(fontSize: 13)),
+                                    const SizedBox(height: 2),
+                                    Row(
+                                      children: [
+                                        Text(
+                                          item.tagId != null ? "المعرّف (Tag): مرتبط بنجاح" : "المعرّف (Tag): غير مرتبط",
+                                          style: TextStyle(
+                                            color: item.tagId != null ? Colors.green : Colors.red,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Icon(
+                                          item.tagId != null ? Icons.check_circle : Icons.cancel,
+                                          color: item.tagId != null ? Colors.green : Colors.red,
+                                          size: 16,
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.remove_circle_outline, color: Colors.redAccent),
-                              onPressed: () => _decreaseQty(i),
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.add_circle_outline, color: Colors.green),
-                              onPressed: () => _increaseQty(i),
-                            ),
-                          ],
                         ),
                       ),
                     );
